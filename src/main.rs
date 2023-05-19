@@ -133,7 +133,7 @@ impl Node<'_> {
         let instruction_maybe = self.instructions[self.instruction_pointer as usize];
         if let Some(instruction) = instruction_maybe {
             if let Some(src) = instruction.get_read_src() {
-                self.handle_reads(src.clone());
+                self.handle_reads(src);
             }
         }
     }
@@ -162,8 +162,8 @@ impl Node<'_> {
         // Now that reads are resolved, we can continue with all other instructions
         let instruction = self.instructions[self.instruction_pointer as usize];
         match instruction {
-            Some(Instruction::Mov(src, dst)) => self.mov(src.clone(), dst.clone()),
-            Some(Instruction::Add(src)) => self.add(src.clone()),
+            Some(Instruction::Mov(src, dst)) => self.mov(src, dst),
+            Some(Instruction::Add(src)) => self.add(src),
             Some(Instruction::Sav) => self.sav(),
             Some(Instruction::Swp) => self.swp(),
             None => self.instruction_pointer = 0,
