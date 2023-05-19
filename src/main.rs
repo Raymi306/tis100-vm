@@ -78,18 +78,7 @@ impl Instruction {
     }
 }
 
-#[derive(Debug)]
-struct Channel {
-    value: Cell<Option<i16>>,
-}
-
-impl Channel {
-    fn new() -> Self {
-        Self {
-            value: Cell::new(None),
-        }
-    }
-}
+type Channel = Cell<Option<i16>>;
 
 #[derive(Debug)]
 struct Node<'a> {
@@ -151,7 +140,7 @@ impl Node<'_> {
                 if self.port_buffer.is_none() {
                     // do not rewrite the port buffer, we may have already read a value
                     // from here. For instance, if we are doing a read/write mov
-                    self.port_buffer = channel.value.take();
+                    self.port_buffer = channel.take();
                 }
             } else {
                 panic!("unconnected port read attempt");
@@ -198,11 +187,11 @@ impl Node<'_> {
             Dst::Port(port) => {
                 let target_port = self.map_port(port);
                 if let Some(channel) = target_port {
-                    if self.mode == Mode::Write && channel.value.get().is_none() {
+                    if self.mode == Mode::Write && channel.get().is_none() {
                         self.mode = Mode::Run;
                         self.port_buffer = None;
                     } else {
-                        channel.value.set(val);
+                        channel.set(val);
                         self.mode = Mode::Write;
                     }
                 } else {
@@ -309,7 +298,7 @@ mod test {
     fn basic_port_mov() {
         let mut node1 = Node::new();
         let mut node2 = Node::new();
-        let channels = vec![Channel::new()];
+        let channels = vec![Channel::new(None)];
         node1.port_1 = Some(&channels[0]);
         node2.port_1 = Some(&channels[0]);
         node1.instructions[0] = Some(Instruction::Mov(Src::Literal(42), Dst::Port(Port::P1)));
@@ -343,7 +332,7 @@ mod test {
     fn port_mov_back() {
         let mut node1 = Node::new();
         let mut node2 = Node::new();
-        let channels = vec![Channel::new()];
+        let channels = vec![Channel::new(None)];
         node1.port_1 = Some(&channels[0]);
         node2.port_1 = Some(&channels[0]);
         node1.instructions[0] = Some(Instruction::Mov(Src::Literal(13), Dst::Port(Port::P1)));
@@ -376,7 +365,7 @@ mod test {
         let mut node1 = Node::new();
         let mut node2 = Node::new();
         let mut node3 = Node::new();
-        let channels = vec![Channel::new(), Channel::new()];
+        let channels = vec![Channel::new(None), Channel::new(None)];
         node1.port_1 = Some(&channels[0]);
         node2.port_1 = Some(&channels[0]);
         node2.port_2 = Some(&channels[1]);
