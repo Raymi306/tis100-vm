@@ -5,7 +5,7 @@ enum Register {
     // There is also a BAK register but it is not addressable
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 enum TruePort {
     Up,
     Down,
@@ -13,6 +13,18 @@ enum TruePort {
     Right,
     // originally a pseudoport, but oh well
     Any,
+}
+
+impl TruePort {
+    fn reverse(&self) -> Self {
+        match self {
+            Self::Left => Self::Right,
+            Self::Up => Self::Down,
+            Self::Right => Self::Left,
+            Self::Down => Self::Up,
+            Self::Any => panic!("Cannot reverse port 'Any'"),
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -58,7 +70,7 @@ enum Instruction {
 }
 
 impl Instruction {
-    fn get_read_src(&self) -> Option<Src> {
+    fn get_src(&self) -> Option<Src> {
         match self {
             Self::Mov(s, _)
             | Self::Sub(s)
@@ -109,16 +121,29 @@ impl ExecutionNode {
     fn fetch(&mut self, instructions: &[Option<Instruction>]) {
         self.current_instruction = instructions[self.instruction_pointer as usize];
     }
+    fn increment_instruction_pointer(&mut self) {
+        self.instruction_pointer += 1;
+        if self.instruction_pointer >= INSTRUCTIONS_PER_NODE as u8 {
+            self.instruction_pointer = 0;
+        }
+    }
+    fn resolve_write(&mut self) {
+        // NOTE move me to a trait?
+        self.mode = Mode::Run;
+        self.increment_instruction_pointer();
+    }
     fn read_step(&mut self) {
         if self.mode == Mode::Read || self.mode == Mode::Write {
             return;
         }
         if let Some(instruction) = self.current_instruction {
-            if let Some(src) = instruction.get_read_src() {
+            if let Some(src) = instruction.get_src() {
                 match src {
                     Src::Port(port) => {
                         self.mode = Mode::Read;
-                        self.direction = Some(self.map_port(port));
+                        let p = self.map_port(port);
+                        self.direction = Some(p);
+                        self.last_port = Some(p)
                     }
                     _ => (),
                 };
@@ -135,10 +160,7 @@ impl ExecutionNode {
             _ => unimplemented!(),
         };
         if self.mode == Mode::Run {
-            self.instruction_pointer += 1;
-            if self.instruction_pointer >= INSTRUCTIONS_PER_NODE as u8 {
-                self.instruction_pointer = 0;
-            }
+            self.increment_instruction_pointer();
         }
     }
     fn mov(&mut self, src: Src, dst: Dst) {
@@ -164,14 +186,15 @@ impl ExecutionNode {
                 if self.mode != Mode::Write {
                     self.mode = Mode::Write;
                     self.port_write_buffer = value;
+                    let p = self.map_port(port);
+                    self.direction = Some(p);
+                    self.last_port = Some(p);
                 }
             }
-            Dst::Register(register) => {
-                match register {
-                    Register::Acc => self.acc = value.unwrap(),
-                    Register::Nil => (),
-                }
-            }
+            Dst::Register(register) => match register {
+                Register::Acc => self.acc = value.unwrap(),
+                Register::Nil => (),
+            },
         };
     }
     fn add(&mut self, src: Src) {
@@ -201,7 +224,24 @@ impl ExecutionNode {
     }
 }
 
+static NODE_LUT: [(Option<u8>, Option<u8>, Option<u8>, Option<u8>); NODES_PER_PLANE] = [
+    // left up right down
+    (None, None, Some(1), Some(4)),
+    (Some(0), None, Some(2), Some(5)),
+    (Some(1), None, Some(3), Some(6)),
+    (Some(2), None, None, Some(7)),
+    (None, Some(0), Some(5), Some(8)),
+    (Some(4), Some(1), Some(6), Some(9)),
+    (Some(5), Some(2), Some(7), Some(10)),
+    (Some(6), Some(3), None, Some(11)),
+    (None, Some(4), Some(9), None),
+    (Some(8), Some(5), Some(10), None),
+    (Some(9), Some(6), Some(11), None),
+    (Some(10), Some(7), None, None),
+];
+
 static PORT_LUT: [(u8, u8, u8, u8); NODES_PER_PLANE] = [
+    // left up right down
     (4, 0, 5, 9),
     (5, 1, 6, 10),
     (6, 2, 7, 11),
@@ -226,6 +266,16 @@ fn map_port(direction: TruePort, i: usize) -> usize {
     }) as usize
 }
 
+fn reverse_map_node(direction: TruePort, i: usize) -> Option<u8> {
+    match direction {
+        TruePort::Left => NODE_LUT[i].0,
+        TruePort::Up => NODE_LUT[i].1,
+        TruePort::Right => NODE_LUT[i].2,
+        TruePort::Down => NODE_LUT[i].3,
+        TruePort::Any => unimplemented!(),
+    }
+}
+
 trait Plane {
     fn step(&mut self) {}
 }
@@ -237,6 +287,7 @@ struct ExecutionPlane {
     nodes: [ExecutionNode; NODES_PER_PLANE],
     ports: [Option<i16>; 31],
     queued_writes: [Option<i16>; 31],
+    clear_writes: Vec<u8>,
     instructions: Box<[Option<Instruction>; NODES_PER_PLANE * INSTRUCTIONS_PER_NODE]>,
 }
 
@@ -247,6 +298,7 @@ impl ExecutionPlane {
             nodes: [NODE; NODES_PER_PLANE],
             ports: [None; 31],
             queued_writes: [None; 31],
+            clear_writes: Vec::with_capacity(NODES_PER_PLANE),
             instructions: Box::new([None; NODES_PER_PLANE * INSTRUCTIONS_PER_NODE]),
         }
     }
@@ -270,11 +322,19 @@ impl Plane for ExecutionPlane {
             .enumerate()
         {
             node.fetch(instructions);
+            if node.current_instruction.is_some() {
+                println!("NODE BEFORE: {:#?}", node);
+            }
             node.read_step();
             if node.mode == Mode::Read {
                 if let Some(direction) = node.direction {
-                    let mut port = self.ports[map_port(direction, i)];
-                    node.port_read_buffer = port.take();
+                    let mut port = &mut self.ports[map_port(direction, i)];
+                    if port.is_some() {
+                        node.port_read_buffer = port.take();
+                        if let Some(index) = reverse_map_node(direction, i) {
+                            self.clear_writes.push(index);
+                        }
+                    }
                 }
             }
             node.step();
@@ -283,19 +343,29 @@ impl Plane for ExecutionPlane {
                     if node.port_write_buffer.is_some() {
                         let index = map_port(direction, i);
                         self.queued_writes[index] = node.port_write_buffer.take();
+                        println!("Queuing write: {:?}", self.queued_writes[index]);
                     }
                 }
             }
-            for (i, write_maybe) in self.queued_writes.iter_mut().enumerate() {
-                if write_maybe.is_some() {
-                    if self.ports[i].is_some() {
-                        panic!("write deadlock");
-                    } else {
-                        self.ports[i] = write_maybe.take();
-                    }
+            if node.current_instruction.is_some() {
+                println!("NODE AFTER: {:#?}", node);
+            }
+        }
+        for (i, write_maybe) in self.queued_writes.iter_mut().enumerate() {
+            if write_maybe.is_some() {
+                if self.ports[i].is_some() {
+                    panic!("write deadlock");
+                } else {
+                    self.ports[i] = write_maybe.take();
                 }
             }
         }
+        for index in self.clear_writes.iter() {
+            println!("index {index} being cleared");
+            let mut node = &mut self.nodes[*index as usize];
+            node.resolve_write();
+        }
+        self.clear_writes.clear();
     }
 }
 
@@ -304,16 +374,6 @@ fn main() {}
 #[cfg(test)]
 mod test {
     use super::*;
-
-    #[test]
-    fn foo() {
-        let mut nodeplane = ExecutionPlane::new();
-        let node_1_instructions = nodeplane.get_node_instructions_mut(0);
-        node_1_instructions[0] = Some(Instruction::Swp);
-        let node_12_instructions = nodeplane.get_node_instructions_mut(11);
-        node_12_instructions[0] = Some(Instruction::Sav);
-        nodeplane.step();
-    }
 
     #[test]
     #[should_panic(expected = "not implemented")]
@@ -353,7 +413,10 @@ mod test {
         let node_1_instructions = nodeplane.get_node_instructions_mut(0);
         node_1_instructions[0] = Some(Instruction::Add(Src::Literal(42)));
         node_1_instructions[1] = Some(Instruction::Sav);
-        node_1_instructions[2] = Some(Instruction::Mov(Src::Literal(13), Dst::Register(Register::Acc)));
+        node_1_instructions[2] = Some(Instruction::Mov(
+            Src::Literal(13),
+            Dst::Register(Register::Acc),
+        ));
         node_1_instructions[3] = Some(Instruction::Swp);
         nodeplane.step();
         nodeplane.step();
@@ -363,41 +426,71 @@ mod test {
         assert_eq!(42, nodeplane.nodes[0].acc);
     }
 
-    /*
     #[test]
     fn basic_port_mov() {
-        let mut node1 = Node::new();
-        let mut node2 = Node::new();
-        let channels = vec![Channel::new(None)];
-        node1.port_1 = Some(&channels[0]);
-        node2.port_1 = Some(&channels[0]);
-        node1.instructions[0] = Some(Instruction::Mov(Src::Literal(42), Dst::Port(Port::P1)));
-        node2.instructions[0] = Some(Instruction::Mov(
-            Src::Port(Port::P1),
-            Dst::Register(AddressableRegister::Acc),
+        let mut nodeplane = ExecutionPlane::new();
+        let node_1_instructions = nodeplane.get_node_instructions_mut(0);
+        node_1_instructions[0] = Some(Instruction::Mov(
+            Src::Literal(42),
+            Dst::Port(Port::True(TruePort::Right)),
         ));
-        node1.instructions[1] = Some(Instruction::Mov(
-            Src::Port(Port::P1),
-            Dst::Register(AddressableRegister::Acc),
+        node_1_instructions[1] = Some(Instruction::Mov(
+            Src::Port(Port::True(TruePort::Right)),
+            Dst::Register(Register::Acc),
         ));
-        node2.instructions[1] = Some(Instruction::Mov(Src::Literal(13), Dst::Port(Port::P1)));
-        let mut nodes = [node1, node2];
-        plane_step(&mut nodes);
-        assert_eq!(Mode::Write, nodes[0].mode);
-        assert_eq!(Mode::Read, nodes[1].mode);
-        plane_step(&mut nodes);
-        assert_eq!(Mode::Run, nodes[0].mode);
-        assert_eq!(Mode::Run, nodes[1].mode);
-        assert_eq!(42, nodes[1].acc);
-        plane_step(&mut nodes);
-        assert_eq!(Mode::Read, nodes[0].mode);
-        assert_eq!(Mode::Write, nodes[1].mode);
-        plane_step(&mut nodes);
-        assert_eq!(Mode::Run, nodes[0].mode);
-        assert_eq!(Mode::Run, nodes[1].mode);
-        assert_eq!(13, nodes[0].acc);
+        let node_2_instructions = nodeplane.get_node_instructions_mut(1);
+        node_2_instructions[0] = Some(Instruction::Mov(
+            Src::Port(Port::True(TruePort::Left)),
+            Dst::Register(Register::Acc),
+        ));
+        node_2_instructions[1] = Some(Instruction::Mov(
+            Src::Literal(13),
+            Dst::Port(Port::True(TruePort::Left)),
+        ));
+        nodeplane.step();
+        assert_eq!(Mode::Write, nodeplane.nodes[0].mode);
+        assert_eq!(Mode::Read, nodeplane.nodes[1].mode);
+        assert_eq!(0, nodeplane.nodes[1].acc);
+        assert_eq!(TruePort::Right, nodeplane.nodes[0].last_port.unwrap());
+        assert_eq!(TruePort::Left, nodeplane.nodes[1].last_port.unwrap());
+        nodeplane.step();
+        assert_eq!(Mode::Run, nodeplane.nodes[0].mode);
+        assert_eq!(Mode::Run, nodeplane.nodes[1].mode);
+        assert_eq!(42, nodeplane.nodes[1].acc);
+        nodeplane.step();
+        assert_eq!(Mode::Read, nodeplane.nodes[0].mode);
+        assert_eq!(Mode::Write, nodeplane.nodes[1].mode);
+        nodeplane.step();
+        assert_eq!(Mode::Run, nodeplane.nodes[0].mode);
+        assert_eq!(Mode::Run, nodeplane.nodes[1].mode);
+        assert_eq!(13, nodeplane.nodes[0].acc);
     }
 
+    #[test]
+    fn nop_then_port_mov() {
+        let mut nodeplane = ExecutionPlane::new();
+        let node_1_instructions = nodeplane.get_node_instructions_mut(0);
+        node_1_instructions[0] = Some(Instruction::Mov(
+            Src::Literal(42),
+            Dst::Port(Port::True(TruePort::Right)),
+        ));
+        let node_2_instructions = nodeplane.get_node_instructions_mut(1);
+        node_2_instructions[0] = Some(Instruction::Add(Src::Register(Register::Acc)));
+        node_2_instructions[1] = Some(Instruction::Mov(
+            Src::Port(Port::True(TruePort::Left)),
+            Dst::Register(Register::Acc),
+        ));
+        nodeplane.step();
+        assert_eq!(Mode::Write, nodeplane.nodes[0].mode);
+        assert_eq!(Mode::Run, nodeplane.nodes[1].mode);
+        nodeplane.step();
+        // note that the Read was instant
+        assert_eq!(Mode::Run, nodeplane.nodes[0].mode);
+        assert_eq!(Mode::Run, nodeplane.nodes[1].mode);
+        assert_eq!(42, nodeplane.nodes[1].acc);
+    }
+
+    /*
     #[test]
     fn port_mov_back() {
         let mut node1 = Node::new();
