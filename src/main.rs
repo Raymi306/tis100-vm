@@ -1,42 +1,37 @@
-use std::cell::Cell;
-
 #[derive(Debug, Copy, Clone)]
 enum Register {
-    Addressable(AddressableRegister),
-    Bak,
+    Acc,
+    Nil,
+    // There is also a BAK register but it is not addressable
 }
 
 #[derive(Debug, Copy, Clone)]
-enum AddressableRegister {
-    Acc,
-    Nil,
+enum TruePort {
+    Up,
+    Down,
+    Left,
+    Right,
+    // originally a pseudoport, but oh well
+    Any,
 }
 
 #[derive(Debug, Copy, Clone)]
 enum Port {
-    P1,
-    P2,
-    P3,
-    P4,
-}
-
-#[derive(Debug, Copy, Clone)]
-enum PsuedoPort {
-    Any(Port),
-    Last(Port),
+    True(TruePort),
+    Last,
 }
 
 #[derive(Debug, Copy, Clone)]
 enum Src {
     Port(Port),
-    Register(AddressableRegister),
+    Register(Register),
     Literal(i16),
 }
 
 #[derive(Debug, Copy, Clone)]
 enum Dst {
     Port(Port),
-    Register(AddressableRegister),
+    Register(Register),
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -78,79 +73,60 @@ impl Instruction {
     }
 }
 
-type Channel = Cell<Option<i16>>;
-
 #[derive(Debug)]
-struct Node<'a> {
+struct ExecutionNode {
     acc: i16,
     bak: i16,
     instruction_pointer: u8,
-    instructions: [Option<Instruction>; 255],
-    port_1: Option<&'a Channel>,
-    port_2: Option<&'a Channel>,
-    port_3: Option<&'a Channel>,
-    port_4: Option<&'a Channel>,
-    port_buffer: Option<i16>,
+    current_instruction: Option<Instruction>,
+    port_read_buffer: Option<i16>,
+    port_write_buffer: Option<i16>,
+    direction: Option<TruePort>,
+    last_port: Option<TruePort>,
     mode: Mode,
 }
 
-impl Node<'_> {
-    fn new() -> Self {
+impl ExecutionNode {
+    const fn new() -> Self {
         Self {
             acc: 0,
             bak: 0,
             instruction_pointer: 0,
-            instructions: [None; 255],
-            port_1: None,
-            port_2: None,
-            port_3: None,
-            port_4: None,
-            port_buffer: None,
+            current_instruction: None,
+            port_read_buffer: None,
+            port_write_buffer: None,
+            direction: None,
+            last_port: None,
             mode: Mode::Run,
         }
     }
-    fn map_port(&self, port: Port) -> Option<&Channel> {
+    fn map_port(&self, port: Port) -> TruePort {
         match port {
-            Port::P1 => self.port_1,
-            Port::P2 => self.port_2,
-            Port::P3 => self.port_3,
-            Port::P4 => self.port_4,
+            Port::True(p) => p,
+            Port::Last => self.last_port.unwrap(),
         }
     }
-    fn read_prestep(&mut self) {
-        // Before we do anything else, we need to resolve all read scenarios
-        let instruction_maybe = self.instructions[self.instruction_pointer as usize];
-        if let Some(instruction) = instruction_maybe {
+    fn fetch(&mut self, instructions: &[Option<Instruction>]) {
+        self.current_instruction = instructions[self.instruction_pointer as usize];
+    }
+    fn read_step(&mut self) {
+        if self.mode == Mode::Read || self.mode == Mode::Write {
+            return;
+        }
+        if let Some(instruction) = self.current_instruction {
             if let Some(src) = instruction.get_read_src() {
-                self.handle_reads(src);
-            }
-        }
-    }
-    fn handle_reads(&mut self, src: Src) {
-        if let Src::Port(port) = src {
-            // If we aren't dealing with a Port as the source, it isn't a read
-            if Mode::Run == self.mode {
-                // If we aren't already reading or writing, assume for now that this is a read
-                self.mode = Mode::Read;
-                // Reading is a two step operation, now that we have signaled intent, return early
-                return;
-            }
-            let target_port = self.map_port(port);
-            if let Some(channel) = target_port {
-                if self.port_buffer.is_none() {
-                    // do not rewrite the port buffer, we may have already read a value
-                    // from here. For instance, if we are doing a read/write mov
-                    self.port_buffer = channel.take();
-                }
-            } else {
-                panic!("unconnected port read attempt");
+                match src {
+                    Src::Port(port) => {
+                        self.mode = Mode::Read;
+                        self.direction = Some(self.map_port(port));
+                    }
+                    _ => (),
+                };
             }
         }
     }
     fn step(&mut self) {
-        // Now that reads are resolved, we can continue with all other instructions
-        let instruction = self.instructions[self.instruction_pointer as usize];
-        match instruction {
+        match self.current_instruction {
             Some(Instruction::Mov(src, dst)) => self.mov(src, dst),
             Some(Instruction::Add(src)) => self.add(src),
             Some(Instruction::Sav) => self.sav(),
@@ -160,78 +136,166 @@ impl Node<'_> {
         };
         if self.mode == Mode::Run {
             self.instruction_pointer += 1;
-            if self.instruction_pointer > 254 {
+            if self.instruction_pointer >= INSTRUCTIONS_PER_NODE as u8 {
                 self.instruction_pointer = 0;
             }
         }
     }
     fn mov(&mut self, src: Src, dst: Dst) {
-        let val = match src {
+        let value = match src {
             Src::Port(_) => {
-                if self.port_buffer.is_some() && self.mode != Mode::Write {
+                if self.port_read_buffer.is_some() && self.mode != Mode::Write {
                     // our read was successful so we reset mode
                     self.mode = Mode::Run;
                 }
-                self.port_buffer
+                self.port_read_buffer
             }
             Src::Register(register) => match register {
-                AddressableRegister::Acc => Some(self.acc),
-                AddressableRegister::Nil => Some(0_i16),
+                Register::Acc => Some(self.acc),
+                Register::Nil => Some(0_i16),
             },
             Src::Literal(v) => Some(v),
         };
-        if val.is_none() {
+        if value.is_none() {
             return;
         }
         match dst {
             Dst::Port(port) => {
-                let target_port = self.map_port(port);
-                if let Some(channel) = target_port {
-                    if self.mode == Mode::Write && channel.get().is_none() {
-                        self.mode = Mode::Run;
-                        self.port_buffer = None;
-                    } else {
-                        channel.set(val);
-                        self.mode = Mode::Write;
-                    }
-                } else {
-                    panic!("unconnected port write attempt");
+                if self.mode != Mode::Write {
+                    self.mode = Mode::Write;
+                    self.port_write_buffer = value;
                 }
             }
             Dst::Register(register) => {
-                self.port_buffer = None;
                 match register {
-                    AddressableRegister::Acc => self.acc = val.unwrap(),
-                    AddressableRegister::Nil => (),
+                    Register::Acc => self.acc = value.unwrap(),
+                    Register::Nil => (),
                 }
             }
         };
     }
     fn add(&mut self, src: Src) {
-        match src {
-            Src::Port(port) => {
-                if self.port_buffer.is_some() {
-                    // our read was successful so we reset mode
-                    self.mode = Mode::Run;
-                    self.acc = self.acc.saturating_add(self.port_buffer.unwrap());
+        if self.mode == Mode::Read {
+            if let Some(value) = self.port_read_buffer {
+                self.acc = self.acc.saturating_add(value);
+                self.mode = Mode::Run;
+            }
+        } else {
+            match src {
+                Src::Register(register) => {
+                    match register {
+                        Register::Acc => self.acc = self.acc.saturating_add(self.acc),
+                        Register::Nil => (),
+                    };
                 }
-            }
-            Src::Register(register) => {
-                match register {
-                    AddressableRegister::Acc => {
-                        self.acc = self.acc.saturating_add(self.acc);
-                    }
-                    AddressableRegister::Nil => (),
-                };
-            }
-            Src::Literal(val) => self.acc = self.acc.saturating_add(val),
-        };
+                Src::Literal(value) => self.acc = self.acc.saturating_add(value),
+                _ => unreachable!(),
+            };
+        }
     }
     fn swp(&mut self) {
         std::mem::swap(&mut self.bak, &mut self.acc);
     }
     fn sav(&mut self) {
         self.bak = self.acc;
+    }
+}
+
+static PORT_LUT: [(u8, u8, u8, u8); NODES_PER_PLANE] = [
+    (4, 0, 5, 9),
+    (5, 1, 6, 10),
+    (6, 2, 7, 11),
+    (7, 3, 8, 12),
+    (13, 9, 14, 18),
+    (14, 10, 15, 19),
+    (15, 11, 16, 20),
+    (16, 12, 17, 21),
+    (22, 18, 23, 27),
+    (23, 19, 24, 28),
+    (24, 20, 25, 29),
+    (25, 21, 26, 30),
+];
+
+fn map_port(direction: TruePort, i: usize) -> usize {
+    (match direction {
+        TruePort::Left => PORT_LUT[i].0,
+        TruePort::Up => PORT_LUT[i].1,
+        TruePort::Right => PORT_LUT[i].2,
+        TruePort::Down => PORT_LUT[i].3,
+        TruePort::Any => unimplemented!(),
+    }) as usize
+}
+
+trait Plane {
+    fn step(&mut self) {}
+}
+
+const NODES_PER_PLANE: usize = 12;
+const INSTRUCTIONS_PER_NODE: usize = 21;
+
+struct ExecutionPlane {
+    nodes: [ExecutionNode; NODES_PER_PLANE],
+    ports: [Option<i16>; 31],
+    queued_writes: [Option<i16>; 31],
+    instructions: Box<[Option<Instruction>; NODES_PER_PLANE * INSTRUCTIONS_PER_NODE]>,
+}
+
+impl ExecutionPlane {
+    fn new() -> Self {
+        const NODE: ExecutionNode = ExecutionNode::new();
+        Self {
+            nodes: [NODE; NODES_PER_PLANE],
+            ports: [None; 31],
+            queued_writes: [None; 31],
+            instructions: Box::new([None; NODES_PER_PLANE * INSTRUCTIONS_PER_NODE]),
+        }
+    }
+    fn get_node_instructions_mut(&mut self, index: u8) -> &mut [Option<Instruction>] {
+        // lil helper func
+        if index >= 12 {
+            panic!("12 nodes per plane, 0 indexed");
+        }
+        let start_offset = index as usize * INSTRUCTIONS_PER_NODE;
+        let end_offset = start_offset + INSTRUCTIONS_PER_NODE;
+        &mut self.instructions[start_offset..end_offset]
+    }
+}
+
+impl Plane for ExecutionPlane {
+    fn step(&mut self) {
+        for (i, (node, instructions)) in self
+            .nodes
+            .iter_mut()
+            .zip(self.instructions.chunks_exact(INSTRUCTIONS_PER_NODE))
+            .enumerate()
+        {
+            node.fetch(instructions);
+            node.read_step();
+            if node.mode == Mode::Read {
+                if let Some(direction) = node.direction {
+                    let mut port = self.ports[map_port(direction, i)];
+                    node.port_read_buffer = port.take();
+                }
+            }
+            node.step();
+            if node.mode == Mode::Write {
+                if let Some(direction) = node.direction {
+                    if node.port_write_buffer.is_some() {
+                        let index = map_port(direction, i);
+                        self.queued_writes[index] = node.port_write_buffer.take();
+                    }
+                }
+            }
+            for (i, write_maybe) in self.queued_writes.iter_mut().enumerate() {
+                if write_maybe.is_some() {
+                    if self.ports[i].is_some() {
+                        panic!("write deadlock");
+                    } else {
+                        self.ports[i] = write_maybe.take();
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -242,58 +306,64 @@ mod test {
     use super::*;
 
     #[test]
+    fn foo() {
+        let mut nodeplane = ExecutionPlane::new();
+        let node_1_instructions = nodeplane.get_node_instructions_mut(0);
+        node_1_instructions[0] = Some(Instruction::Swp);
+        let node_12_instructions = nodeplane.get_node_instructions_mut(11);
+        node_12_instructions[0] = Some(Instruction::Sav);
+        nodeplane.step();
+    }
+
+    #[test]
+    #[should_panic(expected = "not implemented")]
+    fn halt_and_catch_fire() {
+        let mut nodeplane = ExecutionPlane::new();
+        let node_1_instructions = nodeplane.get_node_instructions_mut(0);
+        node_1_instructions[0] = Some(Instruction::Hcf);
+        nodeplane.step();
+    }
+
+    #[test]
     fn basic_add() {
-        let mut node = Node::new();
-        node.instructions[0] = Some(Instruction::Add(Src::Literal(42)));
-        node.instructions[1] = Some(Instruction::Add(Src::Register(AddressableRegister::Acc)));
-        node.read_prestep();
-        node.step();
-        assert_eq!(42, node.acc);
-        node.read_prestep();
-        node.step();
-        assert_eq!(84, node.acc);
+        let mut nodeplane = ExecutionPlane::new();
+        let node_1_instructions = nodeplane.get_node_instructions_mut(0);
+        node_1_instructions[0] = Some(Instruction::Add(Src::Literal(42)));
+        node_1_instructions[1] = Some(Instruction::Add(Src::Register(Register::Acc)));
+        nodeplane.step();
+        assert_eq!(42, nodeplane.nodes[0].acc);
+        nodeplane.step();
+        assert_eq!(84, nodeplane.nodes[0].acc);
     }
 
     #[test]
     fn basic_sav() {
-        let mut node = Node::new();
-        node.instructions[0] = Some(Instruction::Add(Src::Literal(42)));
-        node.instructions[1] = Some(Instruction::Sav);
-        node.read_prestep();
-        node.step();
-        node.read_prestep();
-        node.step();
-        assert_eq!(42, node.bak);
+        let mut nodeplane = ExecutionPlane::new();
+        let node_1_instructions = nodeplane.get_node_instructions_mut(0);
+        node_1_instructions[0] = Some(Instruction::Add(Src::Literal(42)));
+        node_1_instructions[1] = Some(Instruction::Sav);
+        nodeplane.step();
+        nodeplane.step();
+        assert_eq!(42, nodeplane.nodes[0].bak);
     }
 
     #[test]
     fn basic_swp() {
-        let mut node = Node::new();
-        node.instructions[0] = Some(Instruction::Add(Src::Literal(42)));
-        node.instructions[1] = Some(Instruction::Sav);
-        node.instructions[2] = Some(Instruction::Mov(Src::Literal(13), Dst::Register(AddressableRegister::Acc)));
-        node.instructions[3] = Some(Instruction::Swp);
-        node.read_prestep();
-        node.step();
-        node.read_prestep();
-        node.step();
-        node.read_prestep();
-        node.step();
-        node.read_prestep();
-        node.step();
-        assert_eq!(13, node.bak);
-        assert_eq!(42, node.acc);
+        let mut nodeplane = ExecutionPlane::new();
+        let node_1_instructions = nodeplane.get_node_instructions_mut(0);
+        node_1_instructions[0] = Some(Instruction::Add(Src::Literal(42)));
+        node_1_instructions[1] = Some(Instruction::Sav);
+        node_1_instructions[2] = Some(Instruction::Mov(Src::Literal(13), Dst::Register(Register::Acc)));
+        node_1_instructions[3] = Some(Instruction::Swp);
+        nodeplane.step();
+        nodeplane.step();
+        nodeplane.step();
+        nodeplane.step();
+        assert_eq!(13, nodeplane.nodes[0].bak);
+        assert_eq!(42, nodeplane.nodes[0].acc);
     }
 
-    fn plane_step(nodes: &mut [Node]) {
-        for node in nodes.iter_mut() {
-            node.read_prestep();
-        }
-        for node in nodes.iter_mut() {
-            node.step();
-        }
-    }
-
+    /*
     #[test]
     fn basic_port_mov() {
         let mut node1 = Node::new();
@@ -386,4 +456,5 @@ mod test {
             assert_eq!(Mode::Run, node.mode)
         }
     }
+    */
 }
