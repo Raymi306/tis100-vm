@@ -159,6 +159,7 @@ impl ExecutionNode {
         match self.current_instruction {
             Some(Instruction::Mov(src, dst)) => self.mov(src, dst),
             Some(Instruction::Add(src)) => self.add(src),
+            Some(Instruction::Sub(src)) => self.sub(src),
             Some(Instruction::Sav) => self.sav(),
             Some(Instruction::Swp) => self.swp(),
             Some(Instruction::Neg) => self.neg(),
@@ -220,6 +221,25 @@ impl ExecutionNode {
                     };
                 }
                 Src::Literal(value) => self.acc = self.acc.saturating_add(value),
+                _ => unreachable!(),
+            };
+        }
+    }
+    fn sub(&mut self, src: Src) {
+        if self.mode == Mode::Read {
+            if let Some(value) = self.port_read_buffer {
+                self.acc = self.acc.saturating_sub(value);
+                self.mode = Mode::Run;
+            }
+        } else {
+            match src {
+                Src::Register(register) => {
+                    match register {
+                        Register::Acc => self.acc = self.acc.saturating_sub(self.acc),
+                        Register::Nil => (),
+                    };
+                }
+                Src::Literal(value) => self.acc = self.acc.saturating_sub(value),
                 _ => unreachable!(),
             };
         }
