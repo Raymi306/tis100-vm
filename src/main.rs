@@ -119,7 +119,12 @@ impl ExecutionNode {
         }
     }
     fn fetch(&mut self, instructions: &[Option<Instruction>]) {
-        self.current_instruction = instructions[self.instruction_pointer as usize];
+        if let Some(instruction) = instructions[self.instruction_pointer as usize] {
+            self.current_instruction = Some(instruction);
+        } else {
+            self.instruction_pointer = 0;
+            self.current_instruction = instructions[self.instruction_pointer as usize];
+        }
     }
     fn increment_instruction_pointer(&mut self) {
         self.instruction_pointer += 1;
@@ -156,7 +161,10 @@ impl ExecutionNode {
             Some(Instruction::Add(src)) => self.add(src),
             Some(Instruction::Sav) => self.sav(),
             Some(Instruction::Swp) => self.swp(),
-            None => self.instruction_pointer = 0,
+            Some(Instruction::Neg) => self.neg(),
+            None => {
+                return;
+            },
             _ => unimplemented!(),
         };
         if self.mode == Mode::Run {
@@ -221,6 +229,9 @@ impl ExecutionNode {
     }
     fn sav(&mut self) {
         self.bak = self.acc;
+    }
+    fn neg(&mut self) {
+        self.acc = -self.acc;
     }
 }
 
@@ -397,6 +408,79 @@ mod test {
     }
 
     #[test]
+    fn read_add() {
+        let mut nodeplane = ExecutionPlane::new();
+        let node_1_instructions = nodeplane.get_node_instructions_mut(0);
+        node_1_instructions[0] = Some(Instruction::Add(Src::Port(Port::True(TruePort::Right))));
+        let node_2_instructions = nodeplane.get_node_instructions_mut(1);
+        node_2_instructions[0] = Some(Instruction::Mov(
+            Src::Literal(5000),
+            Dst::Port(Port::True(TruePort::Left))
+        ));
+        nodeplane.step();
+        nodeplane.step();
+        assert_eq!(5000, nodeplane.nodes[0].acc);
+    }
+
+    #[test]
+    fn add_negative() {
+        let mut nodeplane = ExecutionPlane::new();
+        let node_1_instructions = nodeplane.get_node_instructions_mut(0);
+        node_1_instructions[0] = Some(Instruction::Add(Src::Literal(-42)));
+        nodeplane.step();
+        assert_eq!(-42, nodeplane.nodes[0].acc);
+    }
+
+    #[test]
+    fn add_saturating() {
+        let max = 32767;
+        let mut nodeplane = ExecutionPlane::new();
+        let node_1_instructions = nodeplane.get_node_instructions_mut(0);
+        node_1_instructions[0] = Some(Instruction::Add(Src::Literal(max)));
+        node_1_instructions[1] = Some(Instruction::Add(Src::Literal(1)));
+        nodeplane.step();
+        nodeplane.step();
+        assert_eq!(max, nodeplane.nodes[0].acc);
+    }
+
+    #[test]
+    fn add_instruction_wraparound() {
+        let mut nodeplane = ExecutionPlane::new();
+        let node_1_instructions = nodeplane.get_node_instructions_mut(0);
+        node_1_instructions[0] = Some(Instruction::Add(Src::Literal(1)));
+        assert_eq!(0, nodeplane.nodes[0].acc);
+        nodeplane.step();
+        assert_eq!(1, nodeplane.nodes[0].acc);
+        nodeplane.step();
+        assert_eq!(2, nodeplane.nodes[0].acc);
+        nodeplane.step();
+        assert_eq!(3, nodeplane.nodes[0].acc);
+    }
+
+    #[test]
+    fn negate() {
+        let mut nodeplane = ExecutionPlane::new();
+        let node_1_instructions = nodeplane.get_node_instructions_mut(0);
+        node_1_instructions[0] = Some(Instruction::Add(Src::Literal(-42)));
+        node_1_instructions[1] = Some(Instruction::Neg);
+        node_1_instructions[2] = Some(Instruction::Neg);
+        nodeplane.step();
+        nodeplane.step();
+        assert_eq!(42, nodeplane.nodes[0].acc);
+        nodeplane.step();
+        assert_eq!(-42, nodeplane.nodes[0].acc);
+    }
+
+    #[test]
+    fn negate_zero() {
+        let mut nodeplane = ExecutionPlane::new();
+        let node_1_instructions = nodeplane.get_node_instructions_mut(0);
+        node_1_instructions[0] = Some(Instruction::Neg);
+        nodeplane.step();
+        assert_eq!(0, nodeplane.nodes[0].acc);
+    }
+
+    #[test]
     fn basic_sav() {
         let mut nodeplane = ExecutionPlane::new();
         let node_1_instructions = nodeplane.get_node_instructions_mut(0);
@@ -490,64 +574,34 @@ mod test {
         assert_eq!(42, nodeplane.nodes[1].acc);
     }
 
-    /*
     #[test]
     fn port_mov_back() {
-        let mut node1 = Node::new();
-        let mut node2 = Node::new();
-        let channels = vec![Channel::new(None)];
-        node1.port_1 = Some(&channels[0]);
-        node2.port_1 = Some(&channels[0]);
-        node1.instructions[0] = Some(Instruction::Mov(Src::Literal(13), Dst::Port(Port::P1)));
-        node2.instructions[0] = Some(Instruction::Mov(Src::Port(Port::P1), Dst::Port(Port::P1)));
-        node1.instructions[1] = Some(Instruction::Mov(
-            Src::Port(Port::P1),
-            Dst::Register(AddressableRegister::Acc),
+        let mut nodeplane = ExecutionPlane::new();
+        let node_1_instructions = nodeplane.get_node_instructions_mut(0);
+        node_1_instructions[0] = Some(Instruction::Mov(
+            Src::Literal(13),
+            Dst::Port(Port::True(TruePort::Right)),
         ));
-        node2.instructions[1] = Some(Instruction::Add(Src::Register(AddressableRegister::Nil))); // nop
-        node1.instructions[2] = Some(Instruction::Hcf);
-        node2.instructions[2] = Some(Instruction::Hcf);
-        let mut nodes = [node1, node2];
-        plane_step(&mut nodes);
-        assert_eq!(Mode::Write, nodes[0].mode);
-        assert_eq!(Mode::Read, nodes[1].mode);
-        plane_step(&mut nodes);
-        assert_eq!(Mode::Run, nodes[0].mode);
-        assert_eq!(Mode::Write, nodes[1].mode);
-        plane_step(&mut nodes);
-        assert_eq!(Mode::Read, nodes[0].mode);
-        assert_eq!(Mode::Write, nodes[1].mode);
-        plane_step(&mut nodes);
-        assert_eq!(Mode::Run, nodes[0].mode);
-        assert_eq!(Mode::Run, nodes[1].mode);
-        assert_eq!(13, nodes[0].acc);
-    }
+        node_1_instructions[1] = Some(Instruction::Mov(
+            Src::Port(Port::True(TruePort::Right)),
+            Dst::Register(Register::Acc),
+        ));
 
-    #[test]
-    fn port_mov_three_nodes() {
-        let mut node1 = Node::new();
-        let mut node2 = Node::new();
-        let mut node3 = Node::new();
-        let channels = vec![Channel::new(None), Channel::new(None)];
-        node1.port_1 = Some(&channels[0]);
-        node2.port_1 = Some(&channels[0]);
-        node2.port_2 = Some(&channels[1]);
-        node3.port_1 = Some(&channels[1]);
-        node1.instructions[0] = Some(Instruction::Mov(Src::Literal(42), Dst::Port(Port::P1)));
-        node2.instructions[0] = Some(Instruction::Mov(Src::Port(Port::P1), Dst::Port(Port::P2)));
-        node3.instructions[0] = Some(Instruction::Mov(
-            Src::Port(Port::P1),
-            Dst::Register(AddressableRegister::Acc),
+        let node_2_instructions = nodeplane.get_node_instructions_mut(1);
+        node_2_instructions[0] = Some(Instruction::Mov(
+                Src::Port(Port::True(TruePort::Left)),
+                Dst::Port(Port::True(TruePort::Left))
         ));
-        node1.instructions[1] = Some(Instruction::Add(Src::Register(AddressableRegister::Nil)));
-        let mut nodes = [node1, node2, node3];
-        plane_step(&mut nodes);
-        plane_step(&mut nodes);
-        plane_step(&mut nodes);
-        assert_eq!(42, nodes[2].acc);
-        for node in nodes {
-            assert_eq!(Mode::Run, node.mode)
-        }
+
+        nodeplane.step();
+        assert_eq!(Mode::Write, nodeplane.nodes[0].mode);
+        assert_eq!(Mode::Read, nodeplane.nodes[1].mode);
+        nodeplane.step();
+        assert_eq!(Mode::Run, nodeplane.nodes[0].mode);
+        assert_eq!(Mode::Write, nodeplane.nodes[1].mode);
+        nodeplane.step();
+        assert_eq!(Mode::Run, nodeplane.nodes[0].mode);
+        assert_eq!(Mode::Run, nodeplane.nodes[1].mode);
+        assert_eq!(13, nodeplane.nodes[0].acc);
     }
-    */
 }
