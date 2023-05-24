@@ -74,21 +74,14 @@ enum Instruction {
 impl Instruction {
     fn get_src(&self) -> Option<Src> {
         match self {
-            Self::Mov(s, _)
-            | Self::Sub(s)
-            | Self::Add(s)
-            | Self::Jro(s) => Some(*s),
+            Self::Mov(s, _) | Self::Sub(s) | Self::Add(s) | Self::Jro(s) => Some(*s),
             _ => None,
         }
     }
     fn is_jump(&self) -> bool {
         match self {
-            Self::Jro(_)
-            | Self::Jez(_)
-            | Self::Jnz(_)
-            | Self::Jgz(_)
-            | Self::Jlz(_) => true,
-            _ => false
+            Self::Jro(_) | Self::Jez(_) | Self::Jnz(_) | Self::Jgz(_) | Self::Jlz(_) => true,
+            _ => false,
         }
     }
 }
@@ -180,7 +173,7 @@ impl ExecutionNode {
             Some(Instruction::Neg) => self.neg(),
             None => {
                 return;
-            },
+            }
             _ => unimplemented!(),
         };
         if self.mode == Mode::Run && !self.current_instruction.unwrap().is_jump() {
@@ -274,11 +267,9 @@ impl ExecutionNode {
             self.port_read_buffer
         } else {
             match src {
-                Src::Register(register) => {
-                    match register {
-                        Register::Acc => Some(self.acc),
-                        Register::Nil => Some(0),
-                    }
+                Src::Register(register) => match register {
+                    Register::Acc => Some(self.acc),
+                    Register::Nil => Some(0),
                 },
                 Src::Literal(value) => Some(value),
                 _ => unreachable!(),
@@ -318,7 +309,6 @@ impl ExecutionNode {
     fn neg(&mut self) {
         self.acc = -self.acc;
     }
-
 }
 
 static NODE_LUT: [(Option<u8>, Option<u8>, Option<u8>, Option<u8>); NODES_PER_PLANE] = [
@@ -391,7 +381,7 @@ struct ExecutionPlane {
 impl ExecutionPlane {
     fn new() -> Self {
         const NODE: ExecutionNode = ExecutionNode::new();
-        
+
         Self {
             nodes: [NODE; NODES_PER_PLANE],
             ports: [None; 31],
@@ -410,7 +400,11 @@ impl ExecutionPlane {
         &mut self.instructions[start_offset..end_offset]
     }
     fn set_node_instruction_length(&mut self) {
-        for (node, instructions) in self.nodes.iter_mut().zip(self.instructions.chunks_exact(INSTRUCTIONS_PER_NODE)) {
+        for (node, instructions) in self
+            .nodes
+            .iter_mut()
+            .zip(self.instructions.chunks_exact(INSTRUCTIONS_PER_NODE))
+        {
             let mut i = 0;
             let mut instructions_iter = instructions.iter();
             while let Some(_) = instructions_iter.next() {
@@ -512,7 +506,7 @@ mod test {
         let node_2_instructions = nodeplane.get_node_instructions_mut(1);
         node_2_instructions[0] = Some(Instruction::Mov(
             Src::Literal(5000),
-            Dst::Port(Port::True(TruePort::Left))
+            Dst::Port(Port::True(TruePort::Left)),
         ));
         nodeplane.step();
         nodeplane.step();
@@ -686,8 +680,8 @@ mod test {
 
         let node_2_instructions = nodeplane.get_node_instructions_mut(1);
         node_2_instructions[0] = Some(Instruction::Mov(
-                Src::Port(Port::True(TruePort::Left)),
-                Dst::Port(Port::True(TruePort::Left))
+            Src::Port(Port::True(TruePort::Left)),
+            Dst::Port(Port::True(TruePort::Left)),
         ));
 
         nodeplane.step();
