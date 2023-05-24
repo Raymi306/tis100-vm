@@ -15,6 +15,7 @@ enum TruePort {
     Any,
 }
 
+/*
 impl TruePort {
     fn reverse(&self) -> Self {
         match self {
@@ -26,6 +27,7 @@ impl TruePort {
         }
     }
 }
+*/
 
 #[derive(Debug, Copy, Clone)]
 enum Port {
@@ -55,17 +57,17 @@ enum Mode {
 
 #[derive(Debug, Copy, Clone)]
 enum Instruction {
+    Mov(Src, Dst),
     Add(Src),
     Sub(Src),
-    Mov(Src, Dst),
+    Jro(Src),
+    Jez(i16),
+    Jnz(i16),
+    Jgz(i16),
+    Jlz(i16),
     Sav,
     Swp,
     Neg,
-    Jro(Src),
-    Jez(Src),
-    Jnz(Src),
-    Jgz(Src),
-    Jlz(Src),
     Hcf,
 }
 
@@ -75,12 +77,18 @@ impl Instruction {
             Self::Mov(s, _)
             | Self::Sub(s)
             | Self::Add(s)
-            | Self::Jro(s)
-            | Self::Jez(s)
-            | Self::Jnz(s)
-            | Self::Jgz(s)
-            | Self::Jlz(s) => Some(*s),
+            | Self::Jro(s) => Some(*s),
             _ => None,
+        }
+    }
+    fn is_jump(&self) -> bool {
+        match self {
+            Self::Jro(_)
+            | Self::Jez(_)
+            | Self::Jnz(_)
+            | Self::Jgz(_)
+            | Self::Jlz(_) => true,
+            _ => false
         }
     }
 }
@@ -90,6 +98,7 @@ struct ExecutionNode {
     acc: i16,
     bak: i16,
     instruction_pointer: u8,
+    instruction_len: Option<u8>,
     current_instruction: Option<Instruction>,
     port_read_buffer: Option<i16>,
     port_write_buffer: Option<i16>,
@@ -104,6 +113,7 @@ impl ExecutionNode {
             acc: 0,
             bak: 0,
             instruction_pointer: 0,
+            instruction_len: None,
             current_instruction: None,
             port_read_buffer: None,
             port_write_buffer: None,
@@ -160,6 +170,11 @@ impl ExecutionNode {
             Some(Instruction::Mov(src, dst)) => self.mov(src, dst),
             Some(Instruction::Add(src)) => self.add(src),
             Some(Instruction::Sub(src)) => self.sub(src),
+            Some(Instruction::Jro(src)) => self.jro(src),
+            Some(Instruction::Jez(src)) => self.jez(src),
+            Some(Instruction::Jnz(src)) => self.jnz(src),
+            Some(Instruction::Jgz(src)) => self.jgz(src),
+            Some(Instruction::Jlz(src)) => self.jlz(src),
             Some(Instruction::Sav) => self.sav(),
             Some(Instruction::Swp) => self.swp(),
             Some(Instruction::Neg) => self.neg(),
@@ -168,7 +183,7 @@ impl ExecutionNode {
             },
             _ => unimplemented!(),
         };
-        if self.mode == Mode::Run {
+        if self.mode == Mode::Run && !self.current_instruction.unwrap().is_jump() {
             self.increment_instruction_pointer();
         }
     }
@@ -244,6 +259,56 @@ impl ExecutionNode {
             };
         }
     }
+    fn jump(&mut self, offset: i16) {
+        let new_pointer = (self.instruction_pointer as i16).saturating_add(offset);
+        if new_pointer < 0 {
+            self.instruction_pointer = 0;
+        } else if new_pointer >= self.instruction_len.unwrap() as i16 {
+            self.instruction_pointer = self.instruction_len.unwrap() - 1;
+        } else {
+            self.instruction_pointer = new_pointer as u8;
+        }
+    }
+    fn jro(&mut self, src: Src) {
+        let new_value = if self.mode == Mode::Read {
+            self.port_read_buffer
+        } else {
+            match src {
+                Src::Register(register) => {
+                    match register {
+                        Register::Acc => Some(self.acc),
+                        Register::Nil => Some(0),
+                    }
+                },
+                Src::Literal(value) => Some(value),
+                _ => unreachable!(),
+            }
+        };
+        if new_value.is_none() {
+            return;
+        }
+        self.jump(new_value.unwrap());
+    }
+    fn jez(&mut self, offset: i16) {
+        if offset == 0 {
+            self.jump(offset);
+        }
+    }
+    fn jnz(&mut self, offset: i16) {
+        if offset != 0 {
+            self.jump(offset);
+        }
+    }
+    fn jgz(&mut self, offset: i16) {
+        if offset > 0 {
+            self.jump(offset);
+        }
+    }
+    fn jlz(&mut self, offset: i16) {
+        if offset < 0 {
+            self.jump(offset);
+        }
+    }
     fn swp(&mut self) {
         std::mem::swap(&mut self.bak, &mut self.acc);
     }
@@ -253,6 +318,7 @@ impl ExecutionNode {
     fn neg(&mut self) {
         self.acc = -self.acc;
     }
+
 }
 
 static NODE_LUT: [(Option<u8>, Option<u8>, Option<u8>, Option<u8>); NODES_PER_PLANE] = [
@@ -325,6 +391,7 @@ struct ExecutionPlane {
 impl ExecutionPlane {
     fn new() -> Self {
         const NODE: ExecutionNode = ExecutionNode::new();
+        
         Self {
             nodes: [NODE; NODES_PER_PLANE],
             ports: [None; 31],
@@ -341,6 +408,16 @@ impl ExecutionPlane {
         let start_offset = index as usize * INSTRUCTIONS_PER_NODE;
         let end_offset = start_offset + INSTRUCTIONS_PER_NODE;
         &mut self.instructions[start_offset..end_offset]
+    }
+    fn set_node_instruction_length(&mut self) {
+        for (node, instructions) in self.nodes.iter_mut().zip(self.instructions.chunks_exact(INSTRUCTIONS_PER_NODE)) {
+            let mut i = 0;
+            let mut instructions_iter = instructions.iter();
+            while let Some(_) = instructions_iter.next() {
+                i += 1;
+            }
+            node.instruction_len = Some(i);
+        }
     }
 }
 
@@ -359,7 +436,7 @@ impl Plane for ExecutionPlane {
             node.read_step();
             if node.mode == Mode::Read {
                 if let Some(direction) = node.direction {
-                    let mut port = &mut self.ports[map_port(direction, i)];
+                    let port = &mut self.ports[map_port(direction, i)];
                     if port.is_some() {
                         node.port_read_buffer = port.take();
                         if let Some(index) = reverse_map_node(direction, i) {
@@ -393,7 +470,7 @@ impl Plane for ExecutionPlane {
         }
         for index in self.clear_writes.iter() {
             println!("index {index} being cleared");
-            let mut node = &mut self.nodes[*index as usize];
+            let node = &mut self.nodes[*index as usize];
             node.resolve_write();
         }
         self.clear_writes.clear();
@@ -623,5 +700,41 @@ mod test {
         assert_eq!(Mode::Run, nodeplane.nodes[0].mode);
         assert_eq!(Mode::Run, nodeplane.nodes[1].mode);
         assert_eq!(13, nodeplane.nodes[0].acc);
+    }
+
+    #[test]
+    fn test_jro_literal_infinite_loop() {
+        let mut nodeplane = ExecutionPlane::new();
+        let node_instructions = nodeplane.get_node_instructions_mut(0);
+        node_instructions[0] = Some(Instruction::Add(Src::Literal(1)));
+        node_instructions[1] = Some(Instruction::Jro(Src::Literal(-1)));
+        node_instructions[2] = Some(Instruction::Hcf);
+        nodeplane.set_node_instruction_length();
+        nodeplane.step();
+        nodeplane.step();
+        nodeplane.step();
+        nodeplane.step();
+        nodeplane.step();
+        assert_eq!(3, nodeplane.nodes[0].acc);
+        nodeplane.step();
+    }
+
+    #[test]
+    fn test_jro_acc_infinite_loop_with_bound_check() {
+        let mut nodeplane = ExecutionPlane::new();
+        let node_instructions = nodeplane.get_node_instructions_mut(0);
+        node_instructions[0] = Some(Instruction::Add(Src::Literal(-999)));
+        node_instructions[1] = Some(Instruction::Add(Src::Literal(0)));
+        node_instructions[2] = Some(Instruction::Jro(Src::Register(Register::Acc)));
+        node_instructions[3] = Some(Instruction::Hcf);
+        nodeplane.set_node_instruction_length();
+        nodeplane.step();
+        nodeplane.step();
+        nodeplane.step();
+        nodeplane.step();
+        nodeplane.step();
+        nodeplane.step();
+        assert_eq!(-1998, nodeplane.nodes[0].acc);
+        nodeplane.step();
     }
 }
