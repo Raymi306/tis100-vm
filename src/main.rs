@@ -424,9 +424,6 @@ impl Plane for ExecutionPlane {
             .enumerate()
         {
             node.fetch(instructions);
-            if node.current_instruction.is_some() {
-                println!("NODE BEFORE: {:#?}", node);
-            }
             node.read_step();
             if node.mode == Mode::Read {
                 if let Some(direction) = node.direction {
@@ -445,12 +442,8 @@ impl Plane for ExecutionPlane {
                     if node.port_write_buffer.is_some() {
                         let index = map_port(direction, i);
                         self.queued_writes[index] = node.port_write_buffer.take();
-                        println!("Queuing write: {:?}", self.queued_writes[index]);
                     }
                 }
-            }
-            if node.current_instruction.is_some() {
-                println!("NODE AFTER: {:#?}", node);
             }
         }
         for (i, write_maybe) in self.queued_writes.iter_mut().enumerate() {
@@ -463,7 +456,6 @@ impl Plane for ExecutionPlane {
             }
         }
         for index in self.clear_writes.iter() {
-            println!("index {index} being cleared");
             let node = &mut self.nodes[*index as usize];
             node.resolve_write();
         }
